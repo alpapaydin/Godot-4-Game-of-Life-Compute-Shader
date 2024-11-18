@@ -18,7 +18,7 @@ var time_since_last_update: float = 0.0
 var simulation_running: bool = true
 var current_image: Image
 var brush_size: int = 1
-var cell_size: int = 2
+var cell_size: int = 4
 var is_drawing: bool = false
 var is_erasing: bool = false
 var display_dimension: int = 512
@@ -93,13 +93,12 @@ func _on_cell_size_changed(value: float) -> void:
 	var screen_size = get_viewport().get_visible_rect().size
 	display_dimension = mini(screen_size.x, screen_size.y)
 	texture_rect.custom_minimum_size = Vector2(display_dimension, display_dimension)
-	update_display()
+	texture_rect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 
 func update_display() -> void:
 	if current_image:
-		var resized_image = current_image.duplicate()
-		resized_image.resize(dimension * cell_size, dimension * cell_size, Image.INTERPOLATE_NEAREST)
-		texture_rect.texture = ImageTexture.create_from_image(resized_image)
+		texture_rect.texture = ImageTexture.create_from_image(current_image)
+		texture_rect.custom_minimum_size = Vector2(dimension * cell_size, dimension * cell_size)
 
 func _on_texture_gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
@@ -116,14 +115,17 @@ func _on_texture_gui_input(event: InputEvent) -> void:
 
 func draw_at_position(pos: Vector2, erase: bool = false) -> void:
 	if not current_image:
-		current_image = Image.create_from_data(dimension, dimension, false, Image.FORMAT_L8, 
+		current_image = Image.create_from_data(dimension, dimension, false, Image.FORMAT_RGBA8, 
 			rd.texture_get_data(current_state_rid, 0))
 	for y in range(-brush_size, brush_size + 1):
 		for x in range(-brush_size, brush_size + 1):
 			var draw_pos = Vector2i(pos) + Vector2i(x, y)
 			if draw_pos.x >= 0 and draw_pos.x < dimension and draw_pos.y >= 0 and draw_pos.y < dimension:
 				if x * x + y * y <= brush_size * brush_size:
-					current_image.set_pixelv(draw_pos, Color(1.0, 1.0, 1.0) if not erase else Color(0.0, 0.0, 0.0))
+					if erase:
+						current_image.set_pixelv(draw_pos, Color(0, 0, 0, 0))
+					else:
+						current_image.set_pixelv(draw_pos, Color(0, 0.5, 1, 1))
 	rd.texture_update(current_state_rid, 0, current_image.get_data())
 	update_display()
 
@@ -145,7 +147,7 @@ func init_gpu() -> void:
 		return
 	shader_rid = load_shader(rd, shader_file)
 	var format := RDTextureFormat.new()
-	format.format = RenderingDevice.DATA_FORMAT_R8_UNORM
+	format.format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM  # Changed from R8_UNORM
 	format.width = dimension
 	format.height = dimension
 	format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | \
@@ -164,11 +166,26 @@ func init_gpu() -> void:
 	uniform_set = rd.uniform_set_create([current_uniform, next_uniform], shader_rid, 0)
 	pipeline = rd.compute_pipeline_create(shader_rid)
 
-func init_game(empty=false) -> void:
+func init_game(empty: bool = false) -> void:
 	var initial_state := PackedByteArray()
-	initial_state.resize(dimension * dimension)
-	for i in range(initial_state.size()):
-		initial_state[i] = (255 if randf() < 0.3 else 0) if not empty else 0
+	initial_state.resize(dimension * dimension * 4)
+	
+	if empty:
+		initial_state.fill(0)
+	else:
+		# Random initialization
+		for i in range(0, initial_state.size(), 4):
+			if randf() < 0.3:
+				initial_state[i] = 0
+				initial_state[i+1] = 128
+				initial_state[i+2] = 255
+				initial_state[i+3] = 255
+			else:
+				initial_state[i] = 0
+				initial_state[i+1] = 0
+				initial_state[i+2] = 0
+				initial_state[i+3] = 0
+	
 	rd.texture_update(current_state_rid, 0, initial_state)
 	current_image = null
 
@@ -183,13 +200,12 @@ func _process(delta: float) -> void:
 	rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
 	rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
 	@warning_ignore("integer_division")
-	rd.compute_list_dispatch(compute_list,dimension / 8, dimension / 8, 1)
+	rd.compute_list_dispatch(compute_list, dimension / 8, dimension / 8, 1)
 	rd.compute_list_end()
 	rd.submit()
 	rd.sync()
 	var output_bytes := rd.texture_get_data(next_state_rid, 0)
-	var result_image := Image.create_from_data(dimension, dimension, false, Image.FORMAT_L8, output_bytes)
-	current_image = result_image
+	current_image = Image.create_from_data(dimension, dimension, false, Image.FORMAT_RGBA8, output_bytes)
 	update_display()
 	var temp_rid := current_state_rid
 	current_state_rid = next_state_rid
