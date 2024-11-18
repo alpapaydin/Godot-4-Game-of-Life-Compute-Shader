@@ -22,6 +22,12 @@ var cell_size: int = 4
 var is_drawing: bool = false
 var is_erasing: bool = false
 var display_dimension: int = 512
+var fps_counter_label: Label
+var frame_time: float = 0.0
+var frame_count: int = 0
+var unlimited_fps: bool = false
+var fps_update_interval: float = 0.5
+var simulation_speed: float = 10.0
 
 func _ready() -> void:
 	setup_ui()
@@ -30,6 +36,7 @@ func _ready() -> void:
 	set_process(true)
 	set_process_input(true)
 	get_tree().get_root().size_changed.connect(_on_cell_size_changed.bind(cell_size)) 
+	_on_speed_changed(30)
 
 func setup_ui() -> void:
 	var vbox := VBoxContainer.new()
@@ -87,6 +94,21 @@ func setup_ui() -> void:
 	texture_rect.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	texture_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	texture_rect.gui_input.connect(_on_texture_gui_input)
+	var fps_container := HBoxContainer.new()
+	controls.add_child(fps_container)
+	fps_counter_label = Label.new()
+	fps_container.add_child(fps_counter_label)
+	fps_counter_label.text = "FPS: 0"
+	var unlimited_checkbox := CheckBox.new()
+	fps_container.add_child(unlimited_checkbox)
+	unlimited_checkbox.text = "Unlimited FPS"
+	unlimited_checkbox.pressed.connect(func(): 
+		unlimited_fps = unlimited_checkbox.button_pressed
+		if unlimited_fps:
+			Engine.max_fps = 0
+		else:
+			Engine.max_fps = int(simulation_speed)
+		)
 
 func _on_cell_size_changed(value: float) -> void:
 	cell_size = int(value)
@@ -132,10 +154,13 @@ func draw_at_position(pos: Vector2, erase: bool = false) -> void:
 func _on_play_button_pressed() -> void:
 	simulation_running = !simulation_running
 	play_button.text = "Pause" if simulation_running else "Play"
-
+	
 func _on_speed_changed(value: float) -> void:
-	update_interval = 1.0 / value
+	simulation_speed = value
+	update_interval = 1.0 / value if !unlimited_fps else 0.0
 	fps_label.text = "%d FPS" % value
+	if !unlimited_fps:
+		Engine.max_fps = int(value)
 
 func _on_reset_pressed() -> void:
 	init_game(true)
@@ -190,22 +215,39 @@ func init_game(empty: bool = false) -> void:
 	current_image = null
 
 func _process(delta: float) -> void:
+	# FPS counter logic
+	frame_time += delta
+	frame_count += 1
+	
+	if frame_time >= fps_update_interval:
+		var fps = frame_count / frame_time
+		fps_counter_label.text = "FPS: %d" % fps
+		frame_time = 0.0
+		frame_count = 0
+	
+	# Game logic
 	if !simulation_running:
 		return
-	time_since_last_update += delta
-	if time_since_last_update < update_interval:
-		return
-	time_since_last_update = 0.0
+		
+	if unlimited_fps:
+		update_simulation(delta)  # Run every frame when unlimited
+	else:
+		time_since_last_update += delta
+		if time_since_last_update >= update_interval:
+			time_since_last_update = 0.0
+			update_simulation(delta)
+
+func update_simulation(_delta: float) -> void:
 	var compute_list := rd.compute_list_begin()
 	rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
 	rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
-	@warning_ignore("integer_division")
 	rd.compute_list_dispatch(compute_list, dimension / 8, dimension / 8, 1)
 	rd.compute_list_end()
 	rd.submit()
 	rd.sync()
 	var output_bytes := rd.texture_get_data(next_state_rid, 0)
-	current_image = Image.create_from_data(dimension, dimension, false, Image.FORMAT_RGBA8, output_bytes)
+	var result_image := Image.create_from_data(dimension, dimension, false, Image.FORMAT_RGBA8, output_bytes)
+	current_image = result_image
 	update_display()
 	var temp_rid := current_state_rid
 	current_state_rid = next_state_rid
@@ -219,7 +261,7 @@ func _process(delta: float) -> void:
 	next_uniform.binding = 1
 	next_uniform.add_id(next_state_rid)
 	uniform_set = rd.uniform_set_create([current_uniform, next_uniform], shader_rid, 0)
-
+	
 func load_shader(p_rd: RenderingDevice, path: String) -> RID:
 	var shader_file_data: RDShaderFile = load(path)
 	var shader_spirv: RDShaderSPIRV = shader_file_data.get_spirv()

@@ -18,3 +18,7 @@ boot_splash/image="res://preview.png"
 boot_splash/fullsize=false
 boot_splash/use_filter=false
 config/icon="res://preview.png"
+
+[display]
+
+window/vsync/vsync_mode=0
